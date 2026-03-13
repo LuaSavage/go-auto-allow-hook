@@ -1,3 +1,3 @@
-module github.com/LuasSavage/go-auto-allow-hook
+module github.com/LuaSavage/go-auto-allow-hook
 
 go 1.21
