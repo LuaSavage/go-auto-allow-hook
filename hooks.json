@@ -5,6 +5,6 @@
       {
         "command": ".cursor/hooks/go-auto-allow-hook"
       }
-    ],
+    ]
   }
 }
