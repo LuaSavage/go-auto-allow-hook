@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "auto-allow-list-hook": [
+      {
+        "command": ".cursor/hooks/go-auto-allow-hook"
+      }
+    ],
+  }
+}
