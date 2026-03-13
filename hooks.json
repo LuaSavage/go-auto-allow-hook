@@ -1,7 +1,7 @@
 {
   "version": 1,
   "hooks": {
-    "auto-allow-list-hook": [
+    "beforeShellExecution": [
       {
         "command": ".cursor/hooks/go-auto-allow-hook"
       }

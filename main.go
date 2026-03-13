@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 )
 
@@ -14,99 +15,148 @@ type Request struct {
 
 // Response describes the structure of the output to Cursor.
 type Response struct {
-	Permission  string `json:"permission"` // "allow" or "deny"
-	UserMessage string `json:"userMessage,omitempty"`
+	Permission   string `json:"permission"` // "allow" or "ask"
+	UserMessage  string `json:"userMessage,omitempty"`
 	AgentMessage string `json:"agentMessage,omitempty"`
 }
 
-// Rule defines a single security rule.
-type Rule struct {
-	Pattern     *regexp.Regexp
-	Action      string // "allow" or "deny"
-	AgentMessage string
-	UserMessage string
+// AllowedItem represents a single allowed command pattern
+type AllowedItem struct {
+	Type        string `json:"type"`                  // для информации, не используется в regexp
+	Pattern     string `json:"pattern"`               // регулярное выражение
+	Description string `json:"description,omitempty"` // опционально
 }
 
-// SecurityEngine holds all rules.
+// Config represents the configuration file structure
+type Config struct {
+	AllowedList     []AllowedItem `json:"allowed-list"`
+	AskMessage      string        `json:"ask-message,omitempty"`
+	AgentAskMessage string        `json:"agent-ask-message,omitempty"`
+}
+
+// SecurityEngine holds the configuration and compiled patterns
 type SecurityEngine struct {
-	Rules []Rule
+	patterns        []*regexp.Regexp
+	askMessage      string
+	agentAskMessage string
 }
 
-// NewSecurityEngine creates an engine with predefined rules.
-// In a more advanced version, you would load these from a config file.
-func NewSecurityEngine() *SecurityEngine {
-	engine := &SecurityEngine{}
-
-	// --- Block Rules (most specific/important first) ---
-	engine.addRule(`rm\s+(-[rf]+\s*)*\/`, "deny", "⛔ Recursive root deletion blocked", "Blocked dangerous command: rm -rf /")
-	engine.addRule(`dd\s+if=.*of=`, "deny", "⛔ DD disk operation blocked", "Blocked dangerous command: dd")
-	engine.addRule(`mkfs\s+|fdisk\s+|parted\s+`, "deny", "⛔ Filesystem format blocked", "Blocked dangerous command: mkfs/fdisk/parted")
-	engine.addRule(`kubectl\s+(apply|delete|create|edit|patch|scale|rollout)`, "deny", "⛔ Kubectl write operation blocked", "Blocked: kubectl write command")
-	engine.addRule(`git\s+(push|commit|rebase|reset|merge|pull|fetch|add|rm)`, "deny", "⛔ Git write operation blocked", "Blocked: git write command")
-	// Add more block rules from the original Python script and cli-config.json
-
-	// --- Allow Rules (for safe commands, often using negative lookahead) ---
-	// Allow specific git read commands
-	engine.addRule(`git\s+(status|log|diff|show|blame|branch\s*$|remote\s*$)`, "allow", "", "")
-	// Allow specific kubectl read commands
-	engine.addRule(`kubectl\s+(get|describe|logs|explain|version|top)`, "allow", "", "")
-	// Allow basic safe system commands
-	engine.addRule(`^(ls|cat|echo|pwd|whoami|date|which|head|tail|grep)\b`, "allow", "", "")
-	// Add more allow rules
-
-	return engine
-}
-
-func (e *SecurityEngine) addRule(pattern string, action, agentMsg, userMsg string) {
-	re, err := regexp.Compile(pattern)
+// LoadConfig reads and parses the configuration file
+func LoadConfig(path string) (*SecurityEngine, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("Warning: invalid regex pattern '%s': %v", pattern, err)
-		return
+		return nil, err
 	}
-	e.Rules = append(e.Rules, Rule{
-		Pattern:     re,
-		Action:      action,
-		AgentMessage: agentMsg,
-		UserMessage: userMsg,
-	})
+
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	// Set default messages if not provided
+	if config.AskMessage == "" {
+		config.AskMessage = "❓ Эта команда не разрешена. Разрешить выполнение?"
+	}
+	if config.AgentAskMessage == "" {
+		config.AgentAskMessage = "Эта команда не в списке разрешенных. Нужно подтверждение пользователя."
+	}
+
+	engine := &SecurityEngine{
+		patterns:        make([]*regexp.Regexp, 0, len(config.AllowedList)),
+		askMessage:      config.AskMessage,
+		agentAskMessage: config.AgentAskMessage,
+	}
+
+	// Compile all patterns
+	for i, item := range config.AllowedList {
+		if item.Pattern == "" {
+			log.Printf("Warning: empty pattern at index %d", i)
+			continue
+		}
+
+		re, err := regexp.Compile(item.Pattern)
+		if err != nil {
+			log.Printf("Warning: invalid regex pattern '%s': %v", item.Pattern, err)
+			continue
+		}
+		engine.patterns = append(engine.patterns, re)
+		log.Printf("Loaded pattern [%s]: %s", item.Type, item.Pattern)
+	}
+
+	log.Printf("Loaded %d allowed patterns", len(engine.patterns))
+	return engine, nil
 }
 
-// CheckCommand evaluates a command against all rules.
-// It returns the first matching rule's action and messages.
-// If no rules match, it defaults to "allow" (fail open) or could default to "deny".
-// In this example, we default to "allow" to be safe for development, but you can change it.
+// CheckCommand evaluates a command against allowed patterns
 func (e *SecurityEngine) CheckCommand(command string) Response {
-	for _, rule := range e.Rules {
-		if rule.Pattern.MatchString(command) {
-			if rule.Action == "deny" {
-				return Response{
-					Permission:  "deny",
-					UserMessage: rule.UserMessage,
-					AgentMessage: rule.AgentMessage,
-				}
-			}
-			// If it's an "allow" rule, we allow it immediately
+	log.Printf("Checking command: %s", command)
+
+	// Check if command matches any allowed pattern
+	for _, pattern := range e.patterns {
+		if pattern.MatchString(command) {
+			log.Printf("Command allowed (matches pattern: %s)", pattern.String())
 			return Response{Permission: "allow"}
 		}
 	}
-	// Default behavior: allow (fail open) - matches original hook's safe default
-	// Consider changing to "deny" for a strict "default-deny" policy
-	return Response{Permission: "allow"}
+
+	// No patterns matched - command is not allowed, ask user
+	log.Printf("Command not in allowlist, asking user")
+	return Response{
+		Permission:   "ask",
+		UserMessage:  e.askMessage,
+		AgentMessage: e.agentAskMessage,
+	}
 }
 
 func main() {
+	// Determine config path
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "."
+	}
+
+	// Try multiple possible config locations
+	possiblePaths := []string{
+		filepath.Join(homeDir, ".cursor", "hooks", "config.json"),
+		"config.json", // current directory
+	}
+
+	var engine *SecurityEngine
+	var loaded bool
+
+	for _, path := range possiblePaths {
+		engine, err = LoadConfig(path)
+		if err == nil {
+			log.Printf("Loaded config from %s", path)
+			loaded = true
+			break
+		}
+		log.Printf("Failed to load config from %s: %v", path, err)
+	}
+
+	if !loaded {
+		log.Fatal("No valid config file found. Please create config.json")
+	}
+
+	// Read command from stdin
 	var req Request
 	decoder := json.NewDecoder(os.Stdin)
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("Error parsing input: %v", err)
-		resp := Response{Permission: "allow"}
+		// On parse error, ask user to be safe
+		resp := Response{
+			Permission:   "ask",
+			UserMessage:  "❓ Разрешить выполнение?",
+			AgentMessage: "Требуется подтверждение.",
+		}
 		json.NewEncoder(os.Stdout).Encode(resp)
 		return
 	}
 
-	engine := NewSecurityEngine()
+	// Check command against allowlist
 	response := engine.CheckCommand(req.Command)
 
+	// Send response back to Cursor
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
 		log.Printf("Error encoding response: %v", err)
 	}
