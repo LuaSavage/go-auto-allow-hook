@@ -1,3 +1,3 @@
-module github.com/yourusername/cursor-hook
+module github.com/LuasSavage/go-auto-allow-hook
 
 go 1.21
